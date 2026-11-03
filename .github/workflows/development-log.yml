@@ -1,0 +1,104 @@
+# Install this file as .github/workflows/development-log.yml in the
+# RaidRunner-Downloads repository. GitHub release events do not cross repositories.
+# Add the same DISCORD_DEVELOPMENT_LOG_WEBHOOK Actions secret in that repository.
+
+name: Discord release log
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      post_test_message:
+        description: 'Post the webhook test publicly (leave off for an Actions-log preview)'
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: discord-release-log-${{ github.event.release.id || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    name: Report a published release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # No checkout: a release tag cannot substitute code that receives the secret.
+      - name: Preview or post the release update
+        shell: bash
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_DEVELOPMENT_LOG_WEBHOOK }}
+          POST_TEST_MESSAGE: ${{ inputs.post_test_message || 'false' }}
+        run: |
+          set -euo pipefail
+          event="$(jq -c '.' "$GITHUB_EVENT_PATH")"
+          get() { printf '%s' "$event" | jq -r "$1"; }
+
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            title='Development-log webhook test'
+            description='User-approved release-webhook test. This does not claim that a release shipped.'
+            link="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            color=5793266
+            preview=true
+            [[ "$POST_TEST_MESSAGE" == "true" ]] && preview=false
+          else
+            tag="$(get '.release.tag_name // "A release"' | tr '\r\n\t' '   ' | cut -c 1-100)"
+            actor="$(get '.release.author.login // .sender.login // "unknown"' | tr '\r\n\t' '   ' | cut -c 1-80)"
+            link="$(get '.release.html_url // empty')"
+            preview=false
+            if [[ "$(get '.release.prerelease // false')" == "true" ]]; then
+              title='Pre-release published'
+              color=10181046
+            else
+              title='Release published'
+              color=5763719
+            fi
+            description="**$tag** was published by **$actor**."
+            [[ "$link" == https://* ]] && description+=$'\n'"[View the published release]($link)"
+          fi
+
+          [[ "$link" == https://* ]] || link=''
+          timestamp="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          payload="$(jq -cn \
+            --arg title "$title" \
+            --arg description "$description" \
+            --arg link "$link" \
+            --arg timestamp "$timestamp" \
+            --argjson color "$color" \
+            '{
+              username: "RaidRunner Development Log",
+              allowed_mentions: {parse: []},
+              embeds: [{
+                title: $title,
+                description: $description,
+                color: $color,
+                timestamp: $timestamp,
+                footer: {text: "Release notes are not copied to Discord."}
+              }]
+            }
+            | if $link == "" then . else .embeds[0].url = $link end')"
+
+          if [[ "$preview" == "true" ]]; then
+            echo 'Dry run only; nothing was posted to Discord.'
+            printf '%s\n' "$payload" | jq '.'
+            exit 0
+          fi
+
+          webhook="${DISCORD_WEBHOOK_URL:-}"
+          case "$webhook" in
+            https://discord.com/api/webhooks/*|https://canary.discord.com/api/webhooks/*|https://ptb.discord.com/api/webhooks/*) ;;
+            '') echo 'DISCORD_DEVELOPMENT_LOG_WEBHOOK is not configured.' >&2; exit 1 ;;
+            *) echo 'Unexpected Discord webhook host or path; refusing to send.' >&2; exit 1 ;;
+          esac
+
+          status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+            --request POST --header 'Content-Type: application/json' --data-binary "$payload" "$webhook")"
+          case "$status" in
+            200|204) echo 'Discord release update posted.' ;;
+            *) echo "Discord rejected the release update (HTTP $status)." >&2; exit 1 ;;
+          esac
