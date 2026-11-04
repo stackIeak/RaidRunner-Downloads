@@ -1,0 +1,89 @@
+# ONE-TIME publisher for the RaidRunner V1.2.3 Stable GitHub release (approved by the owner on 2026-11-03).
+# Runs only on a push to the temporary branch release-assets-v1.2.3, which is deleted afterwards. It never touches
+# updates/stable.json or updates/beta.json (the signed feed is changed separately, after this release is verified).
+name: Publish V1.2.3 release (one-time)
+
+on:
+  push:
+    branches: [release-assets-v1.2.3]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-v1.2.3
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify the release files (sizes and SHA-256 verified before publishing)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets/v1.2.3
+          echo "11b4b8859e9579c88d41bf68f10bf5b90b2195187de71d4f54dc6c494d8a3621  RaidRunner.exe" > expected
+          echo "157dd38f6fea63cb3a38e990c922608bbefac12a5014c6e28354f53c88827879  Raid Runner V1.2.3.zip" >> expected
+          sha256sum -c expected
+          test "$(stat -c %s RaidRunner.exe)" = 85972391
+          grep -qi '^11B4B8859E9579C88D41BF68F10BF5B90B2195187DE71D4F54DC6C494D8A3621  RaidRunner.exe' SHA256.txt
+          grep -qi '^157DD38F6FEA63CB3A38E990C922608BBEFAC12A5014C6E28354F53C88827879  Raid Runner V1.2.3.zip' SHA256.txt
+
+      - name: Create and publish the v1.2.3 release (latest, not a pre-release)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view v1.2.3 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo 'v1.2.3 already exists - refusing to change it.' >&2; exit 1
+          fi
+          cd release-assets/v1.2.3
+          gh release create v1.2.3 --repo "$GITHUB_REPOSITORY" --target main \
+            --title 'Raid Runner V1.2.3' --notes-file notes.md --latest \
+            RaidRunner.exe 'Raid Runner V1.2.3.zip' SHA256.txt
+
+      - name: Verify the published release and its downloads
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release view v1.2.3 --repo "$GITHUB_REPOSITORY" --json tagName,name,isDraft,isPrerelease,assets \
+            --jq '{tagName,name,isDraft,isPrerelease,assets:[.assets[]|{name,size}]}'
+          test "$(gh release view v1.2.3 --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease --jq '.isDraft or .isPrerelease')" = false
+          mkdir -p /tmp/check && cd /tmp/check
+          curl -sSfL -o RaidRunner.exe "https://github.com/$GITHUB_REPOSITORY/releases/download/v1.2.3/RaidRunner.exe"
+          curl -sSfL -o v123.zip "https://github.com/$GITHUB_REPOSITORY/releases/download/v1.2.3/Raid%20Runner%20V1.2.3.zip"
+          echo "11b4b8859e9579c88d41bf68f10bf5b90b2195187de71d4f54dc6c494d8a3621  RaidRunner.exe" > e
+          echo "157dd38f6fea63cb3a38e990c922608bbefac12a5014c6e28354f53c88827879  v123.zip" >> e
+          sha256sum -c e
+
+      - name: Report the published release to the Discord development log
+        shell: bash
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_DEVELOPMENT_LOG_WEBHOOK }}
+        run: |
+          set -euo pipefail
+          # A release created with the workflow token does not trigger the repository's release-log workflow,
+          # so the same notice is sent here (same format; release notes are not copied to Discord).
+          link="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/v1.2.3"
+          payload="$(jq -cn --arg link "$link" --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" '{
+            username: "RaidRunner Development Log", allowed_mentions: {parse: []},
+            embeds: [{title: "Release published", color: 5763719, timestamp: $ts, url: $link,
+              description: ("**v1.2.3** (Raid Runner V1.2.3 Stable) was published.\n[View the published release](" + $link + ")"),
+              footer: {text: "Release notes are not copied to Discord."}}]}')"
+          case "${DISCORD_WEBHOOK_URL:-}" in
+            https://discord.com/api/webhooks/*|https://canary.discord.com/api/webhooks/*|https://ptb.discord.com/api/webhooks/*) ;;
+            '') echo 'DISCORD_DEVELOPMENT_LOG_WEBHOOK is not configured - no Discord notice.' >&2; exit 0 ;;
+            *) echo 'Unexpected Discord webhook host or path; refusing to send.' >&2; exit 1 ;;
+          esac
+          status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --request POST \
+            --header 'Content-Type: application/json' --data-binary "$payload" "$DISCORD_WEBHOOK_URL")"
+          case "$status" in 200|204) echo 'Discord release notice posted.' ;; *) echo "Discord rejected the notice (HTTP $status)." >&2; exit 1 ;; esac
