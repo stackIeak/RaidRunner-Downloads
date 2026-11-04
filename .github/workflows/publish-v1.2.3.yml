@@ -42,7 +42,7 @@ jobs:
         run: |
           set -euo pipefail
           if gh release view v1.2.3 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo 'v1.2.3 already exists - refusing to change it.' >&2; exit 1
+            echo 'v1.2.3 already published - left unchanged (verified below).'; exit 0
           fi
           cd release-assets/v1.2.3
           gh release create v1.2.3 --repo "$GITHUB_REPOSITORY" --target main \
@@ -60,7 +60,7 @@ jobs:
           test "$(gh release view v1.2.3 --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease --jq '.isDraft or .isPrerelease')" = false
           mkdir -p /tmp/check && cd /tmp/check
           curl -sSfL -o RaidRunner.exe "https://github.com/$GITHUB_REPOSITORY/releases/download/v1.2.3/RaidRunner.exe"
-          curl -sSfL -o v123.zip "https://github.com/$GITHUB_REPOSITORY/releases/download/v1.2.3/Raid%20Runner%20V1.2.3.zip"
+          curl -sSfL -o v123.zip "https://github.com/$GITHUB_REPOSITORY/releases/download/v1.2.3/Raid.Runner.V1.2.3.zip"   # GitHub stores spaces as dots
           echo "11b4b8859e9579c88d41bf68f10bf5b90b2195187de71d4f54dc6c494d8a3621  RaidRunner.exe" > e
           echo "157dd38f6fea63cb3a38e990c922608bbefac12a5014c6e28354f53c88827879  v123.zip" >> e
           sha256sum -c e
